@@ -66,6 +66,9 @@ scope and `Type` is expanded into its union components.
 Optionally you can provide the return type `R` to enforce that the generated code returns a value of that type. 
 This is useful to prevent type inference from widening the return type when there are many branches.
 
+Note that when you interpolate the type with `\$`, the macro will resolve the (module-specific) type at macro expansion time.
+Otherwise it will assume the type is a Base or local Module type, which means it might fail at runtime if the type/symbol is not available.
+
 # Example
 
 ```julia
