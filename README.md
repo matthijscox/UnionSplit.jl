@@ -3,7 +3,31 @@ Yet another union splitting macro package. Manual union splitting helps to avoid
 
 Unlike ManualDispatch.jl this works with any number of arguments. Unlike WrappedUnions.jl this doesn't require wrapped types, yet we can still infer the field types in the macro. 
 
-## Wrapping the union
+## Example usage
+
+Any of these approaches should work:
+
+```julia
+f(::String) = 1
+f(::Int) = 2
+
+# provide your desired union via type annotation (::)
+x = "a"
+@unionsplit f(x::Union{String,Int})
+
+# interpolate constants
+const U = Union{String,Int}
+@unionsplit f(x::$U)
+
+# automatic field type detection with the dot syntax:
+struct Wrap
+    u::Union{String,Int}
+end
+w = Wrap(1)
+@unionsplit f(w.u)
+```
+
+## Wrapping the union to avoid dynamic dispatch
 
 Here's our starting code:
 
