@@ -149,12 +149,8 @@ macro unionsplit(expr)
     fields_for_gen = Any[]
     args_for_gen = Any[]
 
-    for (i, ex) in enumerate(arg_exprs)
+    for ex in arg_exprs
         if ex isa Expr && ex.head === :(::) && length(ex.args) == 2
-            ex.args[1] === nothing &&
-                error("Argument annotation must include an expression before `::`, got: $ex")
-            ex.args[2] === nothing &&
-                error("Argument annotation must include a type after `::`, got: $ex")
             expr_before = ex.args[1]
             # Check if annotation target is a field access — if so, pass the owner
             split = _split_field_access(expr_before)
