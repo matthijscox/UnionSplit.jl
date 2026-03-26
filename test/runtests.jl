@@ -9,6 +9,17 @@ module MyModule
 end
 import .MyModule: MyUnion2
 
+macro evalerror(ex)
+    quote
+        try
+            @eval $(esc(ex))
+            ""
+        catch e
+            sprint(showerror, e)
+        end
+    end
+end
+
 do_something(::Real, ::Real) = 0.0
 do_something(::T, ::T) where T<:Real = 0.5
 do_something(::Real, ::String) = 1.0
@@ -74,4 +85,16 @@ end
     @test length(JET.get_reports(r)) > 0
     r = @report_opt map(do_something, pair_vec)
     @test length(JET.get_reports(r)) == 0
+end
+
+@testset "UnionSplit errors" begin
+    err = @evalerror function _bad_unionsplit_usage(a)
+        @unionsplit a
+    end
+    @test occursin("Usage: @unionsplit f(x::T1, y::T2, ...)", err)
+
+    err = @evalerror function _bad_unionsplit_arg(t1::SplitWrapper, t2::SplitWrapper)
+        @unionsplit do_something(t1.x, t2)
+    end
+    @test occursin("Each argument must be `var::Type` or a field access `obj.field`", err)
 end
