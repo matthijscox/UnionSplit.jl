@@ -9,6 +9,17 @@ module MyModule
 end
 import .MyModule: MyUnion2
 
+macro evalerror(ex)
+    quote
+        try
+            @eval $(esc(ex))
+            ""
+        catch e
+            sprint(showerror, e)
+        end
+    end
+end
+
 do_something(::Real, ::Real) = 0.0
 do_something(::T, ::T) where T<:Real = 0.5
 do_something(::Real, ::String) = 1.0
@@ -28,28 +39,56 @@ end
 
 # we use this wrapper type to dispatch in the original function inside `create_matrix`, and then call the static version
 struct SplitWrapper; x::MyUnion; end
-function do_something(t1::SplitWrapper, t2::SplitWrapper)
-    @unionsplit do_something(t1.x::$MyUnion, t2.x::$MyUnion)::Float64
+function do_something(sw1::SplitWrapper, sw2::SplitWrapper)
+    @unionsplit do_something(sw1.x::$MyUnion, sw2.x::$MyUnion)::Float64
 end
 # use a const imported from another module
-# also testing that the output type is optional
+# also testing mixed type annotation
 struct SplitWrapper2; x::MyUnion2; end
-function do_something(t1::SplitWrapper2, t2::SplitWrapper2)
-    @unionsplit do_something(t1.x::$MyUnion2, t2.x::$MyUnion2)
+function do_something(sw1::SplitWrapper2, sw2::SplitWrapper2)
+    @unionsplit do_something(sw1.x, sw2.x::$MyUnion2)
+end
+
+# mixing 3 arguments to test the mixing limits
+do_something_triple(x, y, z) = do_something(x,y)
+function do_something(sw1::SplitWrapper, sw2::SplitWrapper2)
+    @unionsplit do_something_triple(sw1.x, sw2.x, 1.0::Real)
+end
+
+struct PairWrap
+    x::MyUnion
+    y::MyUnion2
+end
+# no type annotation is needed at all for field access
+function do_something(p::PairWrap)
+    @unionsplit do_something(p.x, p.y)
+end
+function do_something_unsplit(p::PairWrap)
+    do_something(p.x, p.y)
 end
 
 @testset "UnionSplit" begin
     vec1 = MyUnion[1.0, 1, "1"]
     vec2 = MyUnion[1.0, 1, "1"]
+
+    # regular call should work as expected
+    out = @unionsplit do_something(vec1[1]::$MyUnion, vec2[2]::$MyUnion)::Float64
+    @test out == do_something(vec1[1], vec2[2])
+
+    sw = SplitWrapper(1)
+    out = @unionsplit do_something(sw.x, 1.0::Real)
+    @test out == do_something(sw.x, 1.0)
+
+    # test matrix creation with unionsplit
     vec1_u = map(SplitWrapper, vec1)
     vec2_u = map(SplitWrapper, vec2)
     @test create_matrix(vec1_u, vec2_u) == create_matrix(vec1, vec2)
 
-    r1 = @report_opt create_matrix(vec1, vec2)
     # check that this cannot be unionsplit anymore (might change in future Julia version, but I want to make sure we test an actual problem here)
+    r1 = @report_opt create_matrix(vec1, vec2)
     @test length(JET.get_reports(r1)) > 0
-    r2 = @report_opt create_matrix(vec1_u, vec2_u)
     # test that we have no JET issues with our unionsplit version
+    r2 = @report_opt create_matrix(vec1_u, vec2_u)
     @test length(JET.get_reports(r2)) == 0
 
     vec1_u2 = map(SplitWrapper2, vec1)
@@ -57,4 +96,52 @@ end
     @test create_matrix(vec1_u2, vec2_u2) == create_matrix(vec1, vec2)
     r3 = @report_opt create_matrix(vec1_u2, vec2_u2)
     @test length(JET.get_reports(r3)) == 0
+
+    # triple mix test
+    @test create_matrix(vec1_u, vec2_u2) == create_matrix(vec1, vec2)
+    r = @report_opt create_matrix(vec1_u, vec2_u2)
+
+    pair_matrix = [PairWrap(v1, v2) for v1 in vec1, v2 in vec2]
+    @test map(do_something, pair_matrix) == map(do_something_unsplit, pair_matrix)
+    r = @report_opt map(do_something_unsplit, pair_matrix)
+    @test length(JET.get_reports(r)) > 0
+    r = @report_opt map(do_something, pair_matrix)
+    @test length(JET.get_reports(r)) == 0
+end
+
+
+const TYPE_WIDEN_U = Union{Vector{Int64}, Vector{Float64}, Vector{Union{Int64, Int32}}}
+struct In
+    a::Union{Int64, Float64}
+end
+
+@testset "Type Widening" begin
+    g(x::Int64) = x > 0 ? Union{Int64, Int32}[] : Int64[]
+    g(x::Float64) = x > 0 ? Union{Float64, Float32}[] : Float64[]
+
+    # we have a potential issue, we infer Vector{T}
+    f(x::In) = @unionsplit g(x.a)
+    @inferred Vector f(In(1))
+
+    # type via module-level const alias
+    g(x::In) = @unionsplit g(x.a)::TYPE_WIDEN_U
+    @inferred TYPE_WIDEN_U g(In(1))
+    @test g(In(1)) == Int64[]
+
+    # define type directly inline
+    h(x::In) = @unionsplit g(x.a)::Union{Vector{Int64}, Vector{Float64}, Vector{Union{Int64, Int32}}}
+    @inferred TYPE_WIDEN_U h(In(1))
+    @test h(In(1)) == Int64[]
+end
+
+@testset "UnionSplit errors" begin
+    err = @evalerror function _bad_unionsplit_usage(a)
+        @unionsplit a
+    end
+    @test occursin("Usage: @unionsplit f(x::T1, y::T2, ...)", err)
+
+    err = @evalerror function _bad_unionsplit_arg(t1::SplitWrapper, t2::SplitWrapper)
+        @unionsplit do_something(t1.x, t2)
+    end
+    @test occursin("Each argument must be `var::Type` or a field access `obj.field`", err)
 end

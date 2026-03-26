@@ -1,39 +1,35 @@
 # UnionSplit.jl
 Yet another union splitting macro package. Manual union splitting helps to avoid dynamic dispatch.
 
-Unlike ManualDispatch.jl this works with any number of arguments. Unlike WrappedUnions.jl this simply writes an if/elseif statement.
+Unlike ManualDispatch.jl this works with any number of arguments. 
+
+Unlike WrappedUnions.jl this doesn't require wrapped types, yet we can still infer the field types in the macro. WrappedUnions supports keyword arguments, which this package does not yet support.
+
+## Example usage
+
+Any of these approaches should work:
 
 ```julia
-using UnionSplit
+f(::String) = 1
+f(::Int) = 2
 
-const U = Union{Real, String}
-@macroexpand @unionsplit f(x::$U, y::Union{Int64, String})
+# provide your desired union via type annotation (::)
+x = "a"
+@unionsplit f(x::Union{String,Int})
 
-:(let x1 = x, x2 = y
-      if x1 isa Float64
-          if x2 isa Int64
-              f(x1, x2)
-          elseif x2 isa String
-              f(x1, x2)
-          else
-              f(x1, x2)
-          end
-      elseif x1 isa String
-          if x2 isa Int64
-              f(x1, x2)
-          elseif x2 isa String
-              f(x1, x2)
-          else
-              f(x1, x2)
-          end
-      else
-          f(x1, x2)
-      end
-  end)
+# interpolate constants
+const U = Union{String,Int}
+@unionsplit f(x::$U)
 
+# automatic field type detection with the dot syntax:
+struct Wrap
+    u::Union{String,Int}
+end
+w = Wrap(1)
+@unionsplit f(w.u)
 ```
 
-## Wrapping the union
+## Wrapping the union to avoid dynamic dispatch
 
 Here's our starting code:
 
@@ -101,12 +97,13 @@ julia> @report_opt create_matrix(vec1, vec2)
 To fix this for any number of types in the Union, just wrap your union in a struct and then dispatch on that (now it's a single dispatch):
 
 ```julia
-# we create the static type split version for this union
-# it's safest to be as concrete as possible here, even though our functions works with (abstract) Real
-const S = Union{Float64, Int64, String}
 # we use this wrapper type to dispatch in the original function inside `create_matrix`, and then call the static version
-struct SplitWrapper; x::S; end
-do_something(t1::SplitWrapper, t2::SplitWrapper) = @unionsplit do_something(t1.x::$S, t2.x::$S)::Float64
+struct SplitWrapper
+    x::Union{Float64, Int64, String}
+end
+function do_something(sw1::SplitWrapper, sw2::SplitWrapper)
+    @unionsplit do_something(sw1.x, sw2.x)
+end
 ```
 
 This fixes our dynamic dispatch:

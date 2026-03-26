@@ -3,6 +3,37 @@ module UnionSplit
 
 export @unionsplit
 
+@generated function unionsplit_fields(f, ::Val{FIELDS}, args...) where {FIELDS}
+    nargs = length(args)
+    length(FIELDS) == nargs || error("Field tuple length must match argument count")
+
+    xvars = [Symbol("x", i) for i in 1:nargs]
+    type_lists = map(1:nargs) do i
+        field = FIELDS[i]
+        if field isa Symbol
+            # Field access arg: derive union type from the struct field declaration.
+            obj_T = Base.unwrap_unionall(args[i])
+            field_T = Base.unwrap_unionall(fieldtype(obj_T, field))
+            field_T isa Union ? Base.uniontypes(field_T) : [field_T]
+        else
+            # Plain value arg (FIELDS[i] === nothing): split on the static arg type.
+            T = Base.unwrap_unionall(args[i])
+            T isa Union ? Base.uniontypes(T) : [T]
+        end
+    end
+
+    assignments = map(1:nargs) do i
+        field = FIELDS[i]
+        if field isa Symbol
+            :(local $(xvars[i]) = getfield(args[$i], $(QuoteNode(field))))
+        else
+            :(local $(xvars[i]) = args[$i])
+        end
+    end
+    dispatch_body = _build_switch_body(:f, xvars, type_lists)
+    return Expr(:block, assignments..., dispatch_body)
+end
+
 # Resolve a type expression, evaluating only explicit interpolation.
 function _resolve_type(ex, mod)
     if ex isa Expr && ex.head === :$
@@ -55,13 +86,26 @@ function _build_switch_body(f, xvars, type_lists)
     return build_tree(1)
 end
 
+# Parse a field access expression like `obj.field` into `(obj, field_symbol)`.
+function _split_field_access(ex)
+    ex isa Expr && ex.head === :. && length(ex.args) == 2 || return nothing
+
+    field = ex.args[2]
+    field isa QuoteNode && field.value isa Symbol || return nothing
+    return (ex.args[1], field.value)
+end
+
 """
     @unionsplit f(x::T₁, y::T₂, ...)
     @unionsplit f(x::T₁, y::T₂, ...)::R
+    @unionsplit f(obj1.field1, obj2.field2, ...)
 
 Generate an inline nested switch statement for use inside a function body.
 Each argument must be written as `var::Type` where `var` is already bound in the enclosing
 scope and `Type` is expanded into its union components.
+
+As a convenience, you can also pass field accesses like `obj.field` without `::Type`.
+In that form, the macro infers split branches from the static type of each expression.
 
 Optionally you can provide the return type `R` to enforce that the generated code returns a value of that type. 
 This is useful to prevent type inference from widening the return type when there are many branches.
@@ -99,24 +143,38 @@ macro unionsplit(expr)
     f = call_expr.args[1]
     arg_exprs = call_expr.args[2:end]
 
-    xvars_exprs = Any[]  # The expressions from call site (e.g., x, y, ...)
-    xvars = Symbol[]     # Local variable names inside our switch (x1 = x, x2 = y, ...)
-    type_specs = []      # The type of each variable `x::T` to resolve
-    for (i, ex) in enumerate(arg_exprs)
-        ex isa Expr && ex.head === :(::) && length(ex.args) == 2 ||
-            error("Each argument must be of the form `var::Type`, got: $ex")
-        ex.args[1] === nothing &&
-            error("Argument annotation must include an expression before `::`, got: $ex")
-        ex.args[2] === nothing &&
-            error("Argument annotation must include a type after `::`, got: $ex")
-        push!(xvars_exprs, ex.args[1])
-        push!(xvars, Symbol("x", i))
-        push!(type_specs, ex.args[2])
+    # Build the FIELDS tuple and args list for unionsplit_fields.
+    # FIELDS[i] = Symbol  → field access: pass owner object, extract field, split on fieldtype
+    # FIELDS[i] = nothing → plain value: pass value directly, split on its static type
+    fields_for_gen = Any[]
+    args_for_gen = Any[]
+
+    for ex in arg_exprs
+        if ex isa Expr && ex.head === :(::) && length(ex.args) == 2
+            expr_before = ex.args[1]
+            # Check if annotation target is a field access — if so, pass the owner
+            split = _split_field_access(expr_before)
+            if split !== nothing
+                push!(args_for_gen, split[1])       # owner object
+                push!(fields_for_gen, QuoteNode(split[2]))  # field symbol
+            else
+                push!(args_for_gen, expr_before)    # plain value
+                push!(fields_for_gen, nothing)      # passthrough
+            end
+            continue
+        end
+
+        # Bare expression: must be a field access
+        split = _split_field_access(ex)
+        split === nothing &&
+            error("Each argument must be `var::Type` or a field access `obj.field`, got: $ex")
+        push!(args_for_gen, split[1])               # owner object
+        push!(fields_for_gen, QuoteNode(split[2]))  # field symbol
     end
 
-    specs = map(ts -> _resolve_type(ts, __module__), type_specs)
-    type_lists = map(_expand_union_like, specs)
-    dispatch_body = _build_switch_body(f, xvars, type_lists)
+    unionsplit_ref = GlobalRef(@__MODULE__, :unionsplit_fields)
+    fields_val = Expr(:call, :Val, Expr(:tuple, fields_for_gen...))
+    dispatch_body = Expr(:call, unionsplit_ref, f, fields_val, args_for_gen...)
 
     # Optionally enforce result type once at the top level.
     if return_type !== nothing
@@ -127,11 +185,7 @@ macro unionsplit(expr)
         end
     end
 
-    # Build let block: let x1 = expr1, x2 = expr2, ...; dispatch_body; end
-    let_block = Expr(:block, [Expr(:(=), xvars[i], xvars_exprs[i]) for i in eachindex(xvars)]...)
-    let_expr = Expr(:let, let_block, dispatch_body)
-
-    return esc(let_expr)
+    return esc(dispatch_body)
 end
 
 end # module UnionSplit
