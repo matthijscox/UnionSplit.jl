@@ -109,6 +109,31 @@ end
     @test length(JET.get_reports(r)) == 0
 end
 
+
+const TYPE_WIDEN_U = Union{Vector{Int64}, Vector{Float64}, Vector{Union{Int64, Int32}}}
+struct In
+    a::Union{Int64, Float64}
+end
+
+@testset "Type Widening" begin
+    g(x::Int64) = x > 0 ? Union{Int64, Int32}[] : Int64[]
+    g(x::Float64) = x > 0 ? Union{Float64, Float32}[] : Float64[]
+
+    # we have a potential issue, we infer Vector{T}
+    f(x::In) = @unionsplit g(x.a)
+    @inferred Vector f(In(1))
+
+    # type via module-level const alias
+    g(x::In) = @unionsplit g(x.a)::TYPE_WIDEN_U
+    @inferred TYPE_WIDEN_U g(In(1))
+    @test g(In(1)) == Int64[]
+
+    # define type directly inline
+    h(x::In) = @unionsplit g(x.a)::Union{Vector{Int64}, Vector{Float64}, Vector{Union{Int64, Int32}}}
+    @inferred TYPE_WIDEN_U h(In(1))
+    @test h(In(1)) == Int64[]
+end
+
 @testset "UnionSplit errors" begin
     err = @evalerror function _bad_unionsplit_usage(a)
         @unionsplit a
