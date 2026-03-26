@@ -1,7 +1,9 @@
 # UnionSplit.jl
 Yet another union splitting macro package. Manual union splitting helps to avoid dynamic dispatch.
 
-Unlike ManualDispatch.jl this works with any number of arguments. Unlike WrappedUnions.jl this doesn't require wrapped types, yet we can still infer the field types in the macro. 
+Unlike ManualDispatch.jl this works with any number of arguments. 
+
+Unlike WrappedUnions.jl this doesn't require wrapped types, yet we can still infer the field types in the macro. WrappedUnions supports keyword arguments, which this package does not yet support.
 
 ## Example usage
 
