@@ -43,25 +43,28 @@ function do_something(sw1::SplitWrapper, sw2::SplitWrapper)
     @unionsplit do_something(sw1.x::$MyUnion, sw2.x::$MyUnion)::Float64
 end
 # use a const imported from another module
-# also testing that the type annotation is optional
+# also testing mixed type annotation
 struct SplitWrapper2; x::MyUnion2; end
 function do_something(sw1::SplitWrapper2, sw2::SplitWrapper2)
-    @unionsplit do_something(sw1.x, sw2.x::MyUnion2)
+    @unionsplit do_something(sw1.x, sw2.x::$MyUnion2)
+end
+
+# mixing 3 arguments to test the mixing limits
+do_something_triple(x, y, z) = do_something(x,y)
+function do_something(sw1::SplitWrapper, sw2::SplitWrapper2)
+    @unionsplit do_something_triple(sw1.x, sw2.x, 1.0::Real)
 end
 
 struct PairWrap
     x::MyUnion
     y::MyUnion2
 end
+# no type annotation is needed at all for field access
 function do_something(p::PairWrap)
     @unionsplit do_something(p.x, p.y)
 end
 function do_something_unsplit(p::PairWrap)
     do_something(p.x, p.y)
-end
-
-function do_something_single(sw::SplitWrapper, x::Real)
-    @unionsplit do_something(sw.x, x::Real)
 end
 
 @testset "UnionSplit" begin
@@ -74,6 +77,7 @@ end
 
     sw = SplitWrapper(1)
     out = @unionsplit do_something(sw.x, 1.0::Real)
+    @test out == do_something(sw.x, 1.0)
 
     # test matrix creation with unionsplit
     vec1_u = map(SplitWrapper, vec1)
@@ -93,10 +97,15 @@ end
     r3 = @report_opt create_matrix(vec1_u2, vec2_u2)
     @test length(JET.get_reports(r3)) == 0
 
-    pair_vec = [PairWrap(v1, v2) for (v1,v2) in zip(vec1,vec2)]
-    r = @report_opt map(do_something_unsplit, pair_vec)
+    # triple mix test
+    @test create_matrix(vec1_u, vec2_u2) == create_matrix(vec1, vec2)
+    r = @report_opt create_matrix(vec1_u, vec2_u2)
+
+    pair_matrix = [PairWrap(v1, v2) for v1 in vec1, v2 in vec2]
+    @test map(do_something, pair_matrix) == map(do_something_unsplit, pair_matrix)
+    r = @report_opt map(do_something_unsplit, pair_matrix)
     @test length(JET.get_reports(r)) > 0
-    r = @report_opt map(do_something, pair_vec)
+    r = @report_opt map(do_something, pair_matrix)
     @test length(JET.get_reports(r)) == 0
 end
 

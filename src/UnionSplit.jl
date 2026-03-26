@@ -3,25 +3,34 @@ module UnionSplit
 
 export @unionsplit
 
-@generated function unionsplit_fields(f, ::Val{FIELDS}, objs...) where {FIELDS}
-    nargs = length(objs)
+@generated function unionsplit_fields(f, ::Val{FIELDS}, args...) where {FIELDS}
+    nargs = length(args)
     length(FIELDS) == nargs || error("Field tuple length must match argument count")
 
     xvars = [Symbol("x", i) for i in 1:nargs]
     type_lists = map(1:nargs) do i
-        obj_T = Base.unwrap_unionall(objs[i])
         field = FIELDS[i]
-        field isa Symbol || error("Expected Symbol field name, got: $field")
-        field_T = Base.unwrap_unionall(fieldtype(obj_T, field))
-        if field_T isa Union
-            Base.uniontypes(field_T)
+        if field isa Symbol
+            # Field access arg: derive union type from the struct field declaration.
+            obj_T = Base.unwrap_unionall(args[i])
+            field_T = Base.unwrap_unionall(fieldtype(obj_T, field))
+            field_T isa Union ? Base.uniontypes(field_T) : [field_T]
         else
-            [field_T]
+            # Plain value arg (FIELDS[i] === nothing): split on the static arg type.
+            T = Base.unwrap_unionall(args[i])
+            T isa Union ? Base.uniontypes(T) : [T]
         end
     end
 
+    assignments = map(1:nargs) do i
+        field = FIELDS[i]
+        if field isa Symbol
+            :(local $(xvars[i]) = getfield(args[$i], $(QuoteNode(field))))
+        else
+            :(local $(xvars[i]) = args[$i])
+        end
+    end
     dispatch_body = _build_switch_body(:f, xvars, type_lists)
-    assignments = [:(local $(xvars[i]) = getfield(objs[$i], $(QuoteNode(FIELDS[i])))) for i in 1:nargs]
     return Expr(:block, assignments..., dispatch_body)
 end
 
@@ -134,82 +143,42 @@ macro unionsplit(expr)
     f = call_expr.args[1]
     arg_exprs = call_expr.args[2:end]
 
-    xvars_exprs = Any[]  # The expressions from call site (e.g., obj for field access, or var for annotated)
-    xvars = Symbol[]     # Local variable names inside our switch (x1 = x, x2 = y, ...)
-    type_specs = Any[]   # Type specs for each arg: explicit types or :inferred sentinel
-    field_symbols = Any[]  # Field symbols for inferred args, or nothing for annotated
-    has_inferred = false
+    # Build the FIELDS tuple and args list for unionsplit_fields.
+    # FIELDS[i] = Symbol  → field access: pass owner object, extract field, split on fieldtype
+    # FIELDS[i] = nothing → plain value: pass value directly, split on its static type
+    fields_for_gen = Any[]
+    args_for_gen = Any[]
 
     for (i, ex) in enumerate(arg_exprs)
         if ex isa Expr && ex.head === :(::) && length(ex.args) == 2
-            # Annotated: var::Type or obj.field::Type
             ex.args[1] === nothing &&
                 error("Argument annotation must include an expression before `::`, got: $ex")
             ex.args[2] === nothing &&
                 error("Argument annotation must include a type after `::`, got: $ex")
-            
             expr_before = ex.args[1]
-            type_spec = ex.args[2]
-            
-            # Check if it's a field access (dot expression)
+            # Check if annotation target is a field access — if so, pass the owner
             split = _split_field_access(expr_before)
             if split !== nothing
-                # Annotated field access: expr.field::Type
-                push!(xvars_exprs, split[1])  # obj
-                push!(xvars, Symbol("x", i))
-                push!(type_specs, type_spec)
-                push!(field_symbols, split[2])  # field symbol
-                has_inferred = true
+                push!(args_for_gen, split[1])       # owner object
+                push!(fields_for_gen, QuoteNode(split[2]))  # field symbol
             else
-                # Regular annotated: var::Type
-                push!(xvars_exprs, expr_before)
-                push!(xvars, Symbol("x", i))
-                push!(type_specs, type_spec)
-                push!(field_symbols, nothing)
+                push!(args_for_gen, expr_before)    # plain value
+                push!(fields_for_gen, nothing)      # passthrough
             end
             continue
         end
 
-        # Inferred: must be obj.field without type annotation
+        # Bare expression: must be a field access
         split = _split_field_access(ex)
         split === nothing &&
             error("Each argument must be `var::Type` or a field access `obj.field`, got: $ex")
-        
-        push!(xvars_exprs, split[1])  # obj
-        push!(xvars, Symbol("x", i))
-        push!(type_specs, nothing)
-        push!(field_symbols, split[2])  # field symbol
+        push!(args_for_gen, split[1])               # owner object
+        push!(fields_for_gen, QuoteNode(split[2]))  # field symbol
     end
 
-    # Check if all arguments are inferred
-    all_inferred = !any(isnothing(f) for f in field_symbols)
-
-    dispatch_body = if all_inferred
-        # All inferred - use generated helper for efficiency
-        field_exprs = [QuoteNode(f) for f in field_symbols]
-        fields_val = Expr(:call, :Val, Expr(:tuple, field_exprs...))
-        infer_call_ref = GlobalRef(@__MODULE__, :unionsplit_fields)
-        Expr(:call, infer_call_ref, f, fields_val, xvars...)
-    else
-        # Annotated or mixed - inline dispatch (compute fieldtype at runtime for inferred)
-        resolved_specs = []
-        for i in 1:length(type_specs)
-            if field_symbols[i] !== nothing
-                # Inferred arg: compute fieldtype at runtime
-                obj = xvars_exprs[i]
-                field = field_symbols[i]
-                spec = :(Base.unwrap_unionall(fieldtype(_argtype($obj), $(QuoteNode(field)))))
-            else
-                # Annotated arg: use provided type
-                spec = _resolve_type(type_specs[i], __module__)
-            end
-            push!(resolved_specs, spec)
-        end
-        
-        specs = resolved_specs
-        type_lists = map(_expand_union_like, specs)
-        _build_switch_body(f, xvars, type_lists)
-    end
+    unionsplit_ref = GlobalRef(@__MODULE__, :unionsplit_fields)
+    fields_val = Expr(:call, :Val, Expr(:tuple, fields_for_gen...))
+    dispatch_body = Expr(:call, unionsplit_ref, f, fields_val, args_for_gen...)
 
     # Optionally enforce result type once at the top level.
     if return_type !== nothing
@@ -220,11 +189,7 @@ macro unionsplit(expr)
         end
     end
 
-    # Build let block: let x1 = expr1, x2 = expr2, ...; dispatch_body; end
-    let_block = Expr(:block, [Expr(:(=), xvars[i], xvars_exprs[i]) for i in eachindex(xvars)]...)
-    let_expr = Expr(:let, let_block, dispatch_body)
-
-    return esc(let_expr)
+    return esc(dispatch_body)
 end
 
 end # module UnionSplit
