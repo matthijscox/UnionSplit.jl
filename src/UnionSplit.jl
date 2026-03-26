@@ -3,7 +3,7 @@ module UnionSplit
 
 export @unionsplit
 
-@generated function _unionsplit_infer_field_call_pure(f, ::Val{FIELDS}, objs...) where {FIELDS}
+@generated function unionsplit_fields(f, ::Val{FIELDS}, objs...) where {FIELDS}
     nargs = length(objs)
     length(FIELDS) == nargs || error("Field tuple length must match argument count")
 
@@ -22,68 +22,6 @@ export @unionsplit
 
     dispatch_body = _build_switch_body(:f, xvars, type_lists)
     assignments = [:(local $(xvars[i]) = getfield(objs[$i], $(QuoteNode(FIELDS[i])))) for i in 1:nargs]
-    return Expr(:block, assignments..., dispatch_body)
-end
-
-@generated function _unionsplit_infer_field_call(f, ::Val{TYPES}, ::Val{FIELDS}, objs...) where {TYPES, FIELDS}
-    nargs = length(objs)
-    length(TYPES) == nargs || error("Type tuple length must match argument count")
-    length(FIELDS) == nargs || error("Field tuple length must match argument count")
-
-    xvars = [Symbol("x", i) for i in 1:nargs]
-    type_lists = map(1:nargs) do i
-        if TYPES[i] === :inferred
-            # Inferred arg: compute from field type
-            obj_T = Base.unwrap_unionall(objs[i])
-            field = FIELDS[i]
-            field isa Symbol || error("Expected Symbol field name for inferred arg, got: $field")
-            field_T = Base.unwrap_unionall(fieldtype(obj_T, field))
-            if field_T isa Union
-                Base.uniontypes(field_T)
-            else
-                [field_T]
-            end
-        else
-            # Annotated arg: use provided type
-            T = Base.unwrap_unionall(TYPES[i])
-            if T isa Union
-                Base.uniontypes(T)
-            else
-                [T]
-            end
-        end
-    end
-
-        all_inferred = all(!isnothing(f) for f in field_symbols)
-        dispatch_body = if all_inferred
-            # All inferred - use generated helper for efficiency
-            field_exprs = [QuoteNode(f) for f in field_symbols]
-            fields_val = Expr(:call, :Val, Expr(:tuple, field_exprs...))
-            infer_call_ref = GlobalRef(@__MODULE__, :_unionsplit_infer_field_call_pure)
-            Expr(:call, infer_call_ref, f, fields_val, xvars...)
-        else
-            # Annotated or mixed - inline dispatch (compute fieldtype at runtime for inferred)
-            resolved_specs = []
-            for i in 1:length(type_specs)
-                if field_symbols[i] !== nothing
-                    # Inferred arg: compute fieldtype at runtime
-                    obj = xvars_exprs[i]
-                    field = field_symbols[i]
-                    spec = :(Base.unwrap_unionall(fieldtype(_argtype($obj), $(QuoteNode(field)))))
-                else
-                    # Annotated arg: use provided type
-                    spec = _resolve_type(type_specs[i], __module__)
-                end
-                push!(resolved_specs, spec)
-            end
-        
-            specs = resolved_specs
-            type_lists = map(_expand_union_like, specs)
-            _build_switch_body(f, xvars, type_lists)
-        end
-    assignments = [:(local $(xvars[i]) = 
-        $(FIELDS[i] !== nothing ? :(getfield(objs[$i], $(QuoteNode(FIELDS[i])))) : :(objs[$i])))
-        for i in 1:nargs]
     return Expr(:block, assignments..., dispatch_body)
 end
 
@@ -250,7 +188,7 @@ macro unionsplit(expr)
         # All inferred - use generated helper for efficiency
         field_exprs = [QuoteNode(f) for f in field_symbols]
         fields_val = Expr(:call, :Val, Expr(:tuple, field_exprs...))
-        infer_call_ref = GlobalRef(@__MODULE__, :_unionsplit_infer_field_call_pure)
+        infer_call_ref = GlobalRef(@__MODULE__, :unionsplit_fields)
         Expr(:call, infer_call_ref, f, fields_val, xvars...)
     else
         # Annotated or mixed - inline dispatch (compute fieldtype at runtime for inferred)

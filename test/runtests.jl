@@ -39,14 +39,14 @@ end
 
 # we use this wrapper type to dispatch in the original function inside `create_matrix`, and then call the static version
 struct SplitWrapper; x::MyUnion; end
-function do_something(t1::SplitWrapper, t2::SplitWrapper)
-    @unionsplit do_something(t1.x::$MyUnion, t2.x::$MyUnion)::Float64
+function do_something(sw1::SplitWrapper, sw2::SplitWrapper)
+    @unionsplit do_something(sw1.x::$MyUnion, sw2.x::$MyUnion)::Float64
 end
 # use a const imported from another module
 # also testing that the type annotation is optional
 struct SplitWrapper2; x::MyUnion2; end
-function do_something(t1::SplitWrapper2, t2::SplitWrapper2)
-    @unionsplit do_something(t1.x, t2.x::MyUnion2)
+function do_something(sw1::SplitWrapper2, sw2::SplitWrapper2)
+    @unionsplit do_something(sw1.x, sw2.x::MyUnion2)
 end
 
 struct PairWrap
@@ -60,18 +60,31 @@ function do_something_unsplit(p::PairWrap)
     do_something(p.x, p.y)
 end
 
+function do_something_single(sw::SplitWrapper, x::Real)
+    @unionsplit do_something(sw.x, x::Real)
+end
+
 @testset "UnionSplit" begin
     vec1 = MyUnion[1.0, 1, "1"]
     vec2 = MyUnion[1.0, 1, "1"]
+
+    # regular call should work as expected
+    out = @unionsplit do_something(vec1[1]::$MyUnion, vec2[2]::$MyUnion)::Float64
+    @test out == do_something(vec1[1], vec2[2])
+
+    sw = SplitWrapper(1)
+    out = @unionsplit do_something(sw.x, 1.0::Real)
+
+    # test matrix creation with unionsplit
     vec1_u = map(SplitWrapper, vec1)
     vec2_u = map(SplitWrapper, vec2)
     @test create_matrix(vec1_u, vec2_u) == create_matrix(vec1, vec2)
 
-    r1 = @report_opt create_matrix(vec1, vec2)
     # check that this cannot be unionsplit anymore (might change in future Julia version, but I want to make sure we test an actual problem here)
+    r1 = @report_opt create_matrix(vec1, vec2)
     @test length(JET.get_reports(r1)) > 0
-    r2 = @report_opt create_matrix(vec1_u, vec2_u)
     # test that we have no JET issues with our unionsplit version
+    r2 = @report_opt create_matrix(vec1_u, vec2_u)
     @test length(JET.get_reports(r2)) == 0
 
     vec1_u2 = map(SplitWrapper2, vec1)
