@@ -3,6 +3,28 @@ module UnionSplit
 
 export @unionsplit
 
+@generated function _unionsplit_infer_field_call(f, ::Val{FIELDS}, objs...) where {FIELDS}
+    nargs = length(objs)
+    length(FIELDS) == nargs || error("Field tuple length must match argument count")
+
+    xvars = [Symbol("x", i) for i in 1:nargs]
+    type_lists = map(1:nargs) do i
+        obj_T = Base.unwrap_unionall(objs[i])
+        field = FIELDS[i]
+        field isa Symbol || error("Expected Symbol field name, got: $field")
+        field_T = Base.unwrap_unionall(fieldtype(obj_T, field))
+        if field_T isa Union
+            Base.uniontypes(field_T)
+        else
+            [field_T]
+        end
+    end
+
+    dispatch_body = _build_switch_body(:f, xvars, type_lists)
+    assignments = [:(local $(xvars[i]) = getfield(objs[$i], $(QuoteNode(FIELDS[i])))) for i in 1:nargs]
+    return Expr(:block, assignments..., dispatch_body)
+end
+
 # Resolve a type expression, evaluating only explicit interpolation.
 function _resolve_type(ex, mod)
     if ex isa Expr && ex.head === :$
@@ -55,13 +77,26 @@ function _build_switch_body(f, xvars, type_lists)
     return build_tree(1)
 end
 
+# Parse a field access expression like `obj.field` into `(obj, field_symbol)`.
+function _split_field_access(ex)
+    ex isa Expr && ex.head === :. && length(ex.args) == 2 || return nothing
+
+    field = ex.args[2]
+    field isa QuoteNode && field.value isa Symbol || return nothing
+    return (ex.args[1], field.value)
+end
+
 """
     @unionsplit f(x::T₁, y::T₂, ...)
     @unionsplit f(x::T₁, y::T₂, ...)::R
+    @unionsplit f(obj1.field1, obj2.field2, ...)
 
 Generate an inline nested switch statement for use inside a function body.
 Each argument must be written as `var::Type` where `var` is already bound in the enclosing
 scope and `Type` is expanded into its union components.
+
+As a convenience, you can also pass field accesses like `obj.field` without `::Type`.
+In that form, the macro infers split branches from the static type of each expression.
 
 Optionally you can provide the return type `R` to enforce that the generated code returns a value of that type. 
 This is useful to prevent type inference from widening the return type when there are many branches.
@@ -102,21 +137,44 @@ macro unionsplit(expr)
     xvars_exprs = Any[]  # The expressions from call site (e.g., x, y, ...)
     xvars = Symbol[]     # Local variable names inside our switch (x1 = x, x2 = y, ...)
     type_specs = []      # The type of each variable `x::T` to resolve
+    field_symbols = Symbol[]
+    has_annotated = false
+    has_inferred = false
     for (i, ex) in enumerate(arg_exprs)
-        ex isa Expr && ex.head === :(::) && length(ex.args) == 2 ||
-            error("Each argument must be of the form `var::Type`, got: $ex")
-        ex.args[1] === nothing &&
-            error("Argument annotation must include an expression before `::`, got: $ex")
-        ex.args[2] === nothing &&
-            error("Argument annotation must include a type after `::`, got: $ex")
-        push!(xvars_exprs, ex.args[1])
+        if ex isa Expr && ex.head === :(::) && length(ex.args) == 2
+            has_annotated = true
+            ex.args[1] === nothing &&
+                error("Argument annotation must include an expression before `::`, got: $ex")
+            ex.args[2] === nothing &&
+                error("Argument annotation must include a type after `::`, got: $ex")
+            push!(xvars_exprs, ex.args[1])
+            push!(xvars, Symbol("x", i))
+            push!(type_specs, ex.args[2])
+            continue
+        end
+
+        split = _split_field_access(ex)
+        split === nothing &&
+            error("Each argument must be `var::Type` or a field access `obj.field`, got: $ex")
+        has_inferred = true
+        push!(xvars_exprs, split[1])
         push!(xvars, Symbol("x", i))
-        push!(type_specs, ex.args[2])
+        push!(field_symbols, split[2])
     end
 
-    specs = map(ts -> _resolve_type(ts, __module__), type_specs)
-    type_lists = map(_expand_union_like, specs)
-    dispatch_body = _build_switch_body(f, xvars, type_lists)
+    if has_annotated && has_inferred
+        error("Mixing `var::Type` and inferred `obj.field` arguments is not supported")
+    end
+
+    dispatch_body = if has_inferred
+        infer_call_ref = GlobalRef(@__MODULE__, :_unionsplit_infer_field_call)
+        fields_val = Expr(:call, :Val, Expr(:tuple, map(QuoteNode, field_symbols)...))
+        Expr(:call, infer_call_ref, f, fields_val, xvars...)
+    else
+        specs = map(ts -> _resolve_type(ts, __module__), type_specs)
+        type_lists = map(_expand_union_like, specs)
+        _build_switch_body(f, xvars, type_lists)
+    end
 
     # Optionally enforce result type once at the top level.
     if return_type !== nothing

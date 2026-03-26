@@ -32,10 +32,21 @@ function do_something(t1::SplitWrapper, t2::SplitWrapper)
     @unionsplit do_something(t1.x::$MyUnion, t2.x::$MyUnion)::Float64
 end
 # use a const imported from another module
-# also testing that the output type is optional
+# also testing that the type annotation is optional
 struct SplitWrapper2; x::MyUnion2; end
 function do_something(t1::SplitWrapper2, t2::SplitWrapper2)
-    @unionsplit do_something(t1.x::$MyUnion2, t2.x::$MyUnion2)
+    @unionsplit do_something(t1.x, t2.x::MyUnion2)
+end
+
+struct PairWrap
+    x::MyUnion
+    y::MyUnion2
+end
+function do_something(p::PairWrap)
+    @unionsplit do_something(p.x, p.y)
+end
+function do_something_unsplit(p::PairWrap)
+    do_something(p.x, p.y)
 end
 
 @testset "UnionSplit" begin
@@ -57,4 +68,10 @@ end
     @test create_matrix(vec1_u2, vec2_u2) == create_matrix(vec1, vec2)
     r3 = @report_opt create_matrix(vec1_u2, vec2_u2)
     @test length(JET.get_reports(r3)) == 0
+
+    pair_vec = [PairWrap(v1, v2) for (v1,v2) in zip(vec1,vec2)]
+    r = @report_opt map(do_something_unsplit, pair_vec)
+    @test length(JET.get_reports(r)) > 0
+    r = @report_opt map(do_something, pair_vec)
+    @test length(JET.get_reports(r)) == 0
 end
